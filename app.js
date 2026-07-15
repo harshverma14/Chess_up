@@ -8,7 +8,11 @@ const app = express();
 const server = http.createServer(app);
 const io = socket(server);
 const chess = new Chess();
-let players = {}; // Stores player sockets
+
+let players = {
+    white: { id: null, name: null },
+    black: { id: null, name: null }
+};
 let currentPlayer = 'w';
 
 app.set('view engine', 'ejs');
@@ -21,39 +25,64 @@ app.get('/', (req, res) => {
 io.on("connection", (uniquesocket) => {
     console.log('A user connected:', uniquesocket.id);
 
-    // Assign white and black players
-    if (!players.white) {
-        players.white = uniquesocket.id;
-        uniquesocket.emit("playerRole", "w");
-    } else if (!players.black) {
-        players.black = uniquesocket.id;
-        uniquesocket.emit("playerRole", "b");
-    } else {
-        uniquesocket.emit("spectatorRole");
-    }
+    uniquesocket.on('playerRegistered', (name) => {
+        if (!players.white.id) {
+            players.white = { id: uniquesocket.id, name: name };
+            uniquesocket.emit("playerRole", "w");
+            
+            io.emit("playerNames", {
+                white: name,
+                black: players.black.name || "Waiting..."
+            });
+        } else if (!players.black.id) {
+            players.black = { id: uniquesocket.id, name: name };
+            uniquesocket.emit("playerRole", "b");
+            
+            io.emit("playerNames", {
+                white: players.white.name,
+                black: name
+            });
+            
+            io.emit("gameReady");
+        } else {
+            uniquesocket.emit("spectatorRole");
+        }
 
-    // Send initial board state
-    uniquesocket.emit("boardState", chess.fen());
+        uniquesocket.emit("boardState", chess.fen());
+    });
 
     uniquesocket.on("disconnect", () => {
-        console.log('User disconnected:', uniquesocket.id);
-        if (uniquesocket.id === players.white) {
-            delete players.white;
-        } else if (uniquesocket.id === players.black) {
-            delete players.black;
+        if (players.white.id === uniquesocket.id) {
+            players.white = { id: null, name: null };
         }
+        if (players.black.id === uniquesocket.id) {
+            players.black = { id: null, name: null };
+        }
+
+        io.emit("playerNames", {
+            white: players.white.name || "Waiting...",
+            black: players.black.name || "Waiting..."
+        });
+
+        io.emit("playerDisconnected");
+        chess.reset();
+        io.emit("resetGame");
+        console.log("A player disconnected. Resetting game...");
     });
 
     uniquesocket.on("move", (move) => {
         try {
-            // ✅ Fixed: Correct turn validation
-            if (chess.turn() === "w" && uniquesocket.id !== players.white) return;
-            if (chess.turn() === "b" && uniquesocket.id !== players.black) return;
+            if (chess.turn() === "w" && uniquesocket.id !== players.white.id) return;
+            if (chess.turn() === "b" && uniquesocket.id !== players.black.id) return;
+
+            if (players.white.id && players.black.id) {
+                io.emit("move", move);
+            }
 
             const result = chess.move(move);
             if (result) {
                 currentPlayer = chess.turn();
-                io.emit("boardState", chess.fen()); // ✅ Correct: Broadcast new board state
+                io.emit("boardState", chess.fen());
             } else {
                 uniquesocket.emit("invalidMove");
                 console.log("Invalid move attempted:", move);
@@ -62,6 +91,10 @@ io.on("connection", (uniquesocket) => {
             console.log("Move error:", e);
             uniquesocket.emit("invalidMove", move);
         }
+    });
+
+    uniquesocket.on("getBoardState", () => {
+        uniquesocket.emit("boardState", chess.fen());
     });
 });
 
